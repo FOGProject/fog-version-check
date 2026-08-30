@@ -1,0 +1,4 @@
+# Runtime state: the last known good version of each branch. Regenerated from
+# GitHub within CACHE_TTL of being deleted, so it is never worth committing --
+# and committing it would make a stale value survive a redeploy.
+cache/*.txt
