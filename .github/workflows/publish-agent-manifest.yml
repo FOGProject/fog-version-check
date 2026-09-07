@@ -168,11 +168,17 @@ jobs:
           mv out/manifest.json.sig agent-stable.json.sig
           rm -rf out artifacts build
 
-          if git diff --quiet -- agent-stable.json agent-stable.json.sig; then
+          # Stage FIRST, then ask the index what changed. `git diff` on the
+          # working tree never reports an untracked file, so checking before
+          # staging made the very first publish -- the one where both files
+          # are new -- report 'nothing changed' and push nothing, while the
+          # run stayed green. Observed on run 34118694253: the manifest was
+          # signed correctly and then silently discarded.
+          git add agent-stable.json agent-stable.json.sig
+          if git diff --cached --quiet -- agent-stable.json agent-stable.json.sig; then
             echo 'nothing changed; the manifest already describes this release'
             exit 0
           fi
-          git add agent-stable.json agent-stable.json.sig
           # The committer is the Actions bot, not a person. This is the one
           # identity set anywhere in this repository, and it is set inline
           # rather than with `git config` so it cannot leak into any other
