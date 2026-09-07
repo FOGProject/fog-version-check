@@ -1,0 +1,183 @@
+# Sign and publish the fog-agent release manifest.
+#
+# `agent-stable.json` is what every fog-agent fetches to find out what a
+# version IS: the sha256 and URL of each artifact, signed under a root
+# compiled into the agent itself. The agent then fetches
+# `agent-stable.json.sig` beside it. Neither this server nor the FOG server
+# that asked for the update is trusted -- a mirror can serve nothing, an old
+# manifest (refused by the agent's sequence floor) or the real one, and
+# there is no fourth option.
+#
+# WHY THIS LIVES HERE rather than in fog-agent's release workflow:
+#
+#   1. It runs after a release EXISTS, so it hashes the artifacts people
+#      will actually download. Building the manifest inside the release
+#      means building it before publication and getting the ordering right
+#      by hand -- Authenticode rewrites the Windows files, so a manifest
+#      made before signing describes bytes nobody will ever receive. Here
+#      that constraint cannot be got wrong: signing has definitionally
+#      already happened.
+#   2. The previous manifest is just the file in this repo, so carrying
+#      versions forward is reading a file rather than fetching a URL and
+#      handling a 404.
+#   3. Signing and publishing become one step, so a release cannot be
+#      signed and then forgotten.
+#
+# WHAT IT NEEDS (all in this repository's settings):
+#
+#   Secret  FOG_AGENT_SIGNING_LEAF_KEY   contents of leaf.key
+#   Secret  FOG_AGENT_SIGNING_LEAF_CRT   contents of leaf.crt
+#
+# Both come from build/mint-signing-ca.sh in fog-agent. The ROOT key is not
+# here and must never be: it is offline, its certificate is compiled into
+# the agent, and the leaf is deliberately short-lived so that a leak costs a
+# reissue and touches no deployed machine.
+#
+# TRAP: the signature is over the manifest's exact bytes. Nothing may
+# reformat it -- not jq, not an editor, not a PHP layer. It is committed as
+# a static file and must be SERVED as one; generating it from index.php
+# would break every signature.
+name: Publish the agent release manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'fog-agent release tag, e.g. v0.1.2. Empty means the latest release.'
+        required: false
+        default: ''
+  # So fog-agent's release workflow can trigger this later without anyone
+  # clicking. It needs a token with access here, which is why it is not the
+  # only trigger: workflow_dispatch works today with no credential at all.
+  repository_dispatch:
+    types: [fog-agent-released]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: work out which release to publish
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          tag="${INPUT_TAG:-$DISPATCH_TAG}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release view --repo FOGProject/fog-agent --json tagName --jq .tagName)
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publishing the manifest for $tag"
+
+      - name: fetch the release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          mkdir -p artifacts
+          # Everything except the checksum file and any manifest an older
+          # release published as an asset. sign-manifest.sh skips the MSI
+          # itself -- a manifest artifact is the file the agent renames over
+          # its own binary, and an installer is not that.
+          gh release download "$TAG" --repo FOGProject/fog-agent --dir artifacts \
+            --pattern 'fog-agent-*'
+          ls -l artifacts
+
+      - name: fetch the signing script from that exact release
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          # Pinned to the tag being published, not to main: the manifest is
+          # written in the format that release's agent knows how to read,
+          # and a format change in fog-agent cannot retroactively alter a
+          # manifest published for an older one.
+          mkdir -p build
+          url="https://raw.githubusercontent.com/FOGProject/fog-agent/${TAG}/build/sign-manifest.sh"
+          if ! curl -fsSL --max-time 30 -o build/sign-manifest.sh "$url"; then
+            # Says which of the two things went wrong, because the bare 404
+            # from raw.githubusercontent names neither. A release from
+            # before self-update existed has no signing script and no agent
+            # that could use a manifest anyway.
+            echo "Could not fetch build/sign-manifest.sh from ${TAG}." >&2
+            echo "If ${TAG} predates self-update it carries no signing script," >&2
+            echo "and its agents cannot self-update regardless: publish a" >&2
+            echo "manifest only for releases that contain it." >&2
+            exit 1
+          fi
+          chmod +x build/sign-manifest.sh
+
+      - name: sign the manifest
+        env:
+          LEAF_KEY: ${{ secrets.FOG_AGENT_SIGNING_LEAF_KEY }}
+          LEAF_CRT: ${{ secrets.FOG_AGENT_SIGNING_LEAF_CRT }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          if [ -z "$LEAF_KEY" ] || [ -z "$LEAF_CRT" ]; then
+            echo 'The signing leaf is not configured. See docs in fog-agent:' >&2
+            echo 'docs/signing/release-signing-ca.md' >&2
+            exit 1
+          fi
+          # umask before the writes, not chmod after: chmod leaves a window
+          # in which the key is on disk world-readable.
+          umask 077
+          d=$(mktemp -d)
+          printf '%s' "$LEAF_KEY" > "$d/leaf.key"
+          printf '%s' "$LEAF_CRT" > "$d/leaf.crt"
+
+          # Carry every version already published forward. Manifest.Find()
+          # looks a version up by exact key, so a manifest describing only
+          # the newest release answers no_artifact for anything older -- and
+          # naming an older version is the only recovery from a build that
+          # installs, starts and polls perfectly well and then behaves
+          # badly. Local rollback cannot catch that one.
+          prev=agent-stable.json
+          [ -f "$prev" ] || : > "$prev"
+
+          # Seconds since the epoch, not a counter. A counter tied to a
+          # workflow resets if the workflow is renamed or recreated, and a
+          # reset is indistinguishable from a replay: every agent that had
+          # accepted the higher number refuses with stale_manifest, and
+          # there is no way to lower a floor an agent has already recorded.
+          ./build/sign-manifest.sh \
+            --version "${TAG#v}" \
+            --sequence "$(date -u +%s)" \
+            --url-base "https://github.com/FOGProject/fog-agent/releases/download/${TAG}" \
+            --dir "$d" \
+            --out out \
+            --merge "$prev" \
+            artifacts/*
+          rm -rf "$d"
+
+      - name: commit both files together
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          # BOTH files in ONE commit, always. The agent fetches the manifest
+          # and then fetches <url>.sig separately, so a commit that moved one
+          # without the other would leave a window in which every polling
+          # agent reads a signature that does not match the manifest and
+          # reports signature_invalid -- a fleet-wide false alarm naming the
+          # wrong cause.
+          mv out/manifest.json     agent-stable.json
+          mv out/manifest.json.sig agent-stable.json.sig
+          rm -rf out artifacts build
+
+          if git diff --quiet -- agent-stable.json agent-stable.json.sig; then
+            echo 'nothing changed; the manifest already describes this release'
+            exit 0
+          fi
+          git add agent-stable.json agent-stable.json.sig
+          # The committer is the Actions bot, not a person. This is the one
+          # identity set anywhere in this repository, and it is set inline
+          # rather than with `git config` so it cannot leak into any other
+          # command in this job.
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "agent: publish the ${TAG} release manifest"
+          git push
