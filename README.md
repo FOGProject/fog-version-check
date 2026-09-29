@@ -12,8 +12,8 @@ anything else already pointed at this URL.
 
 | Request | Answer |
 |---|---|
-| `POST version=<FOG_VERSION>` | HTML: up to date, or the latest of all three branches |
-| `?stable` `?dev` `?alpha` | JSON, any combination — e.g. `{"stable":"1.5.10.2254","dev":"1.5.10.2439","alpha":"1.6.0-beta.4691"}` |
+| `POST version=<FOG_VERSION>` | HTML: up to date, or the latest of every branch |
+| `?stable` `?dev` `?alpha` `?rc` | JSON, any combination — e.g. `{"stable":"1.5.10.2254","dev":"1.5.10.2439","alpha":"1.6.0-beta.4691","rc":"1.6.0-RC-1"}` |
 | `/version.php` | The bare `VERSION` constant from `config.php`. Vestigial — see that file |
 
 `alpha` is the **beta** branch (`working-1.6`). The parameter predates the branch
@@ -26,6 +26,13 @@ being called beta and is not renamed, because callers exist that we cannot see.
 | `stable` | `packages/web/lib/fog/system.class.php` on raw.githubusercontent |
 | `dev-branch` | same path, that branch |
 | `working-1.6` | the release prefix from `packages/web/src/Base/System.php`, **plus a commit count from the GitHub compare API** |
+| `rc-*` | `packages/web/src/Base/System.php` on the highest `rc-*` branch by version, found through the GitHub API |
+
+An rc branch commits its version (`1.6.0-RC-1`, `-RC-2`, …) into `System.php`,
+so the source is exactly what a running RC server reports. The branch name
+changes per release, so it is resolved the way the installer's
+`channelToBranch` does it: highest version wins, and `rc-1.6.10` beats
+`rc-1.6.2`.
 
 That third row is the whole reason this repo exists rather than a file edited in
 place on the host.
@@ -50,7 +57,8 @@ number as `ahead_by`:
 `per_page=1&page=2` is load-bearing. The `files[]` diff of `master...working-1.6`
 is attached to page 1 only, so asking for page 2 takes the response from ~2.5 MB
 to ~13 KB while `ahead_by` stays present on every page. Unauthenticated GitHub
-allows 60 requests an hour per IP; the 300-second cache makes this 12. The API
+allows 60 requests an hour per IP; the 300-second cache makes this 12, and
+the rc branch lookup another 12. The API
 also rejects any request that sends no `User-Agent`.
 
 ## Deploy
@@ -70,7 +78,7 @@ php version/bin/diagnose.php
 Only `cache/` is writable by the web user. Nothing that serves a request can
 then rewrite `index.php`, which is the point of not making the checkout writable.
 
-The three `cache/*.txt` files are runtime state and gitignored. Deleting them
+The `cache/*.txt` files are runtime state and gitignored. Deleting them
 costs one GitHub fetch.
 
 ## Updating
@@ -89,8 +97,8 @@ classic symptom is replacing the file and seeing the old behavior unchanged.
 sudo -u nginx php /var/www/html/website/version/bin/diagnose.php
 ```
 
-Checks the deploy (right file on disk, opcache revalidation), GitHub (all three
-sources, the compare API, the rate limit) and the cache (writable, contents,
+Checks the deploy (right file on disk, opcache revalidation), GitHub (every
+source, the rc branch lookup, the compare API, the rate limit) and the cache (writable, contents,
 age) — independently, sharing no code with `index.php`, so it can tell you the
 endpoint itself is broken. Exit status is non-zero if anything failed.
 

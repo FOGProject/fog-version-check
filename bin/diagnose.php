@@ -118,6 +118,30 @@ line(
             isset($cmp['message']) ? '-- ' . $cmp['message'] : ''
         )
 );
+// The release candidate lives on the highest rc-* branch, whose name changes
+// per release. Resolved the same way as index.php and the installer.
+$res = get('https://api.github.com/repos/FOGProject/fogproject/git/matching-refs/heads/rc-');
+$refs = json_decode($res['body'], true);
+$rc = '';
+foreach (is_array($refs) ? $refs : [] as $ref) {
+    if (isset($ref['ref']) && preg_match('#^refs/heads/rc-([0-9][0-9.]*)$#', $ref['ref'], $m)
+        && ($rc === '' || version_compare($m[1], $rc, '>'))
+    ) {
+        $rc = $m[1];
+    }
+}
+if ($rc === '') {
+    // No rc-* branch is a real state between releases, not a failure.
+    line('rc branch', is_array($refs), is_array($refs) ? 'none published' : "HTTP {$res['code']} {$res['err']}");
+} else {
+    $res = get("$raw/rc-$rc/packages/web/src/Base/System.php");
+    $ver = preg_match("/FOG_VERSION',\s*'([0-9A-Za-z.-]+)'/", $res['body'], $m) ? $m[1] : '';
+    line(
+        "source rc-$rc",
+        $ver !== '',
+        $ver !== '' ? "HTTP {$res['code']} -> $ver" : "HTTP {$res['code']} {$res['err']}"
+    );
+}
 $rl = json_decode(get('https://api.github.com/rate_limit')['body'], true);
 if (isset($rl['resources']['core'])) {
     $core = $rl['resources']['core'];
@@ -131,7 +155,7 @@ if (isset($rl['resources']['core'])) {
 head('Cache');
 $dir = $root . '/cache';
 line('cache/ writable', is_writable($dir), $dir);
-foreach (['stable-version.txt', 'dev-branch-version.txt', 'betabranch-version.txt'] as $name) {
+foreach (['stable-version.txt', 'dev-branch-version.txt', 'betabranch-version.txt', 'rc-version.txt'] as $name) {
     $path = "$dir/$name";
     if (!file_exists($path)) {
         line($name, true, 'absent -- will be fetched on the next request');
@@ -147,6 +171,6 @@ foreach (['stable-version.txt', 'dev-branch-version.txt', 'betabranch-version.tx
 
 head($fail ? "$fail check(s) FAILED" : 'All checks passed');
 echo "\nTo force a refresh, delete the cache and hit the endpoint:\n";
-echo "  rm -f $dir/*.txt && curl -s 'https://fogproject.org/version/index.php?stable&dev&alpha'\n\n";
+echo "  rm -f $dir/*.txt && curl -s 'https://fogproject.org/version/index.php?stable&dev&alpha&rc'\n\n";
 
 exit($fail ? 1 : 0);

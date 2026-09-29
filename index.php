@@ -123,6 +123,46 @@ function betaVersion()
     return $prefix . '.' . $compare['ahead_by'];
 }
 
+/**
+ * The current release candidate: FOG_VERSION on the highest rc-* branch.
+ *
+ * The branch name changes per release (rc-1.6.0, rc-1.6.1, ...), so it is
+ * resolved the way the installer's channelToBranch does it in
+ * lib/common/functions.sh: list the remote rc-* heads and take the highest
+ * VERSION, not the newest date. rc-1.6.10 beats rc-1.6.2, which a lexical
+ * sort gets backwards.
+ *
+ * No count is needed here. An rc branch bumps its suffix by committing it
+ * into System.php (1.6.0-RC-1, -RC-2, ...), and fog-version.sh leaves the
+ * committed value standing in head mode, so the source IS what a running RC
+ * server reports.
+ *
+ * One API call per cache refresh: 12 an hour, 24 with the beta count, of 60.
+ */
+function rcVersion()
+{
+    $refs = json_decode(httpGet(REPO_API . '/git/matching-refs/heads/rc-'), true);
+    if (!is_array($refs)) {
+        return '';
+    }
+    $best = '';
+    foreach ($refs as $ref) {
+        if (!isset($ref['ref'])
+            || !preg_match('#^refs/heads/rc-([0-9][0-9.]*)$#', $ref['ref'], $m)
+        ) {
+            continue;
+        }
+        if ($best === '' || version_compare($m[1], $best, '>')) {
+            $best = $m[1];
+        }
+    }
+    if ($best === '') {
+        return '';
+    }
+
+    return sourceVersion('rc-' . $best, 'packages/web/src/Base/System.php');
+}
+
 // Keyed by the request parameter each one answers to. 'alpha' is the beta
 // branch: the parameter predates the branch being called beta and is a public
 // contract with anything already calling this endpoint, so it stays.
@@ -134,9 +174,10 @@ $versions = [
         return sourceVersion('dev-branch', 'packages/web/lib/fog/system.class.php');
     }),
     'alpha' => cached('betabranch-version.txt', 'betaVersion'),
+    'rc' => cached('rc-version.txt', 'rcVersion'),
 ];
 
-// JSON: any combination of ?stable, ?dev, ?alpha returns just those.
+// JSON: any combination of ?stable, ?dev, ?alpha, ?rc returns just those.
 $requested = array_intersect_key($versions, $_REQUEST);
 if ($requested) {
     header('Content-Type: application/json');
@@ -149,6 +190,7 @@ $labels = [
     'stable' => 'stable',
     'dev' => 'dev-branch',
     'alpha' => 'beta-branch',
+    'rc' => 'release-candidate',
 ];
 $curversion = trim(isset($_REQUEST['version']) ? $_REQUEST['version'] : '');
 
@@ -165,6 +207,11 @@ if ($running === '') {
     // Escaped: $curversion is reflected straight back out of the request.
     echo '<p>You are currently running version: ' . htmlspecialchars($curversion, ENT_QUOTES) . '</p>';
     foreach ($versions as $key => $version) {
+        // No answer and no cache yet: say nothing rather than print a blank
+        // version. Most likely for rc, between releases.
+        if ($version === '') {
+            continue;
+        }
         echo '<p>Latest ' . $labels[$key] . ' version is ' . $version . '</p>';
     }
 } else {
