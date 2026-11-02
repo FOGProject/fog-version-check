@@ -163,15 +163,54 @@ function rcVersion()
     return sourceVersion('rc-' . $best, 'packages/web/src/Base/System.php');
 }
 
+/**
+ * The version a stable or dev-branch install reports.
+ *
+ * Both branches carry 1.6 since the 1.6.0 release (2026-11-02). 1.6 keeps
+ * FOG_VERSION in src/Base/System.php; 1.5 kept it in lib/fog/system.class.php,
+ * which 1.6 deleted. Read the old path only, and the fetch 404s, cached()
+ * keeps the last 1.5 value, and every 1.6 install is told it is out of date.
+ *
+ * Like beta, a 1.6 branch commits only the release (1.6.0); the build number a
+ * server reports is `git rev-list master..HEAD --count`, recovered here as the
+ * compare API's ahead_by. A stable release that wrote its full number
+ * (1.6.0.N) into System.php is taken as it stands.
+ *
+ * @param string $branch stable or dev-branch
+ *
+ * @return string the version, or '' when GitHub did not answer
+ */
+function lineVersion($branch)
+{
+    $version = sourceVersion($branch, 'packages/web/src/Base/System.php');
+    if ($version === '') {
+        return sourceVersion($branch, 'packages/web/lib/fog/system.class.php');
+    }
+    if (!preg_match('/^([0-9]+\.[0-9]+\.[0-9]+)(\.[0-9]+)?$/', $version, $m)) {
+        return $version;
+    }
+    if ($branch === 'stable' && !empty($m[2])) {
+        return $version;
+    }
+    $compare = json_decode(
+        httpGet(REPO_API . '/compare/master...' . $branch . '?per_page=1&page=2'),
+        true
+    );
+    if (!isset($compare['ahead_by'])) {
+        return '';
+    }
+    return $m[1] . '.' . $compare['ahead_by'];
+}
+
 // Keyed by the request parameter each one answers to. 'alpha' is the beta
 // branch: the parameter predates the branch being called beta and is a public
 // contract with anything already calling this endpoint, so it stays.
 $versions = [
     'stable' => cached('stable-version.txt', function () {
-        return sourceVersion('stable', 'packages/web/lib/fog/system.class.php');
+        return lineVersion('stable');
     }),
     'dev' => cached('dev-branch-version.txt', function () {
-        return sourceVersion('dev-branch', 'packages/web/lib/fog/system.class.php');
+        return lineVersion('dev-branch');
     }),
     'alpha' => cached('betabranch-version.txt', 'betaVersion'),
     'rc' => cached('rc-version.txt', 'rcVersion'),
