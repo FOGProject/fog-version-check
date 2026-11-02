@@ -103,6 +103,22 @@ foreach ($sources as $branch => $url) {
         $ver !== '' ? "HTTP {$res['code']} -> $ver" : "HTTP {$res['code']} {$res['err']}"
     );
 }
+// stable is answered from the newest release tag, not from a source file.
+// See stableVersion() in index.php.
+$res = get('https://api.github.com/repos/FOGProject/fogproject/releases?per_page=100');
+$rels = json_decode($res['body'], true);
+$tags = is_array($rels) ? array_values(array_filter(array_map(function ($r) {
+    $t = isset($r['tag_name']) ? $r['tag_name'] : '';
+    return preg_match('/^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$/', $t) ? $t : '';
+}, $rels))) : [];
+usort($tags, 'version_compare');
+line(
+    'releases API (stable)',
+    count($tags) > 0,
+    count($tags) > 0
+        ? "HTTP {$res['code']} -> highest release " . end($tags)
+        : "HTTP {$res['code']} {$res['err']}"
+);
 // working-1.6 carries only the release fallback since GH-1513 made FOG_VERSION
 // a generated file, so its build number has to be counted. See index.php.
 $res = get('https://api.github.com/repos/FOGProject/fogproject/compare/master...working-1.6?per_page=1&page=2');
