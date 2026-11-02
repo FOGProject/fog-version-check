@@ -137,7 +137,8 @@ function betaVersion()
  * committed value standing in head mode, so the source IS what a running RC
  * server reports.
  *
- * One API call per cache refresh: 12 an hour, 24 with the beta count, of 60.
+ * One API call per cache refresh. With the beta and dev compares and the
+ * stable release list, four per 300 s refresh: 48 an hour, of 60.
  */
 function rcVersion()
 {
@@ -164,7 +165,7 @@ function rcVersion()
 }
 
 /**
- * The version a stable or dev-branch install reports.
+ * The version a dev-branch install reports.
  *
  * Both branches carry 1.6 since the 1.6.0 release (2026-11-02). 1.6 keeps
  * FOG_VERSION in src/Base/System.php; 1.5 kept it in lib/fog/system.class.php,
@@ -172,24 +173,19 @@ function rcVersion()
  * keeps the last 1.5 value, and every 1.6 install is told it is out of date.
  *
  * Like beta, a 1.6 branch commits only the release (1.6.0); the build number a
- * server reports is `git rev-list master..HEAD --count`, recovered here as the
- * compare API's ahead_by. A stable release that wrote its full number
- * (1.6.0.N) into System.php is taken as it stands.
- *
- * @param string $branch stable or dev-branch
+ * dev-branch server reports is `git rev-list master..HEAD --count`, recovered
+ * here as the compare API's ahead_by.
  *
  * @return string the version, or '' when GitHub did not answer
  */
-function lineVersion($branch)
+function devVersion()
 {
+    $branch = 'dev-branch';
     $version = sourceVersion($branch, 'packages/web/src/Base/System.php');
     if ($version === '') {
         return sourceVersion($branch, 'packages/web/lib/fog/system.class.php');
     }
     if (!preg_match('/^([0-9]+\.[0-9]+\.[0-9]+)(\.[0-9]+)?$/', $version, $m)) {
-        return $version;
-    }
-    if ($branch === 'stable' && !empty($m[2])) {
         return $version;
     }
     $compare = json_decode(
@@ -202,16 +198,46 @@ function lineVersion($branch)
     return $m[1] . '.' . $compare['ahead_by'];
 }
 
+/**
+ * The version a stable install reports: the newest release.
+ *
+ * A stable checkout sits on a release, and fogproject's fog-version.sh
+ * reports that release tag -- as it stands when four-part (1.6.0.N), with
+ * .0 appended when three-part (1.6.0 is build 0). A release tag never
+ * carries a '-', which leaves out every 1.6.0-RC-N.
+ *
+ * @return string the version, or '' when GitHub did not answer
+ */
+function stableVersion()
+{
+    $releases = json_decode(httpGet(REPO_API . '/releases?per_page=100'), true);
+    if (!is_array($releases)) {
+        return '';
+    }
+    $best = '';
+    foreach ($releases as $release) {
+        $tag = isset($release['tag_name']) ? $release['tag_name'] : '';
+        if (!empty($release['draft']) || !empty($release['prerelease'])
+            || !preg_match('/^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$/', $tag)
+        ) {
+            continue;
+        }
+        if ($best === '' || version_compare($tag, $best, '>')) {
+            $best = $tag;
+        }
+    }
+    if ($best === '') {
+        return '';
+    }
+    return substr_count($best, '.') === 2 ? $best . '.0' : $best;
+}
+
 // Keyed by the request parameter each one answers to. 'alpha' is the beta
 // branch: the parameter predates the branch being called beta and is a public
 // contract with anything already calling this endpoint, so it stays.
 $versions = [
-    'stable' => cached('stable-version.txt', function () {
-        return lineVersion('stable');
-    }),
-    'dev' => cached('dev-branch-version.txt', function () {
-        return lineVersion('dev-branch');
-    }),
+    'stable' => cached('stable-version.txt', 'stableVersion'),
+    'dev' => cached('dev-branch-version.txt', 'devVersion'),
     'alpha' => cached('betabranch-version.txt', 'betaVersion'),
     'rc' => cached('rc-version.txt', 'rcVersion'),
 ];

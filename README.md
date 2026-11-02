@@ -13,7 +13,7 @@ anything else already pointed at this URL.
 | Request | Answer |
 |---|---|
 | `POST version=<FOG_VERSION>` | HTML: up to date, or the latest of every branch |
-| `?stable` `?dev` `?alpha` `?rc` | JSON, any combination — e.g. `{"stable":"1.5.10.2254","dev":"1.5.10.2439","alpha":"1.6.0-beta.4691","rc":"1.6.0-RC-1"}` |
+| `?stable` `?dev` `?alpha` `?rc` | JSON, any combination — e.g. `{"stable":"1.6.0.0","dev":"1.6.0.7","alpha":"1.6.0-beta.246","rc":"1.6.0"}` |
 | `/version.php` | The bare `VERSION` constant from `config.php`. Vestigial — see that file |
 
 `alpha` is the **beta** branch (`working-1.6`). The parameter predates the branch
@@ -23,8 +23,8 @@ being called beta and is not renamed, because callers exist that we cannot see.
 
 | Branch | Source |
 |---|---|
-| `stable` | `packages/web/src/Base/System.php` on raw.githubusercontent. A full release number (`1.6.0.N`) is used as it stands; a bare release (`1.6.0`) gets the compare API count appended, like beta. Falls back to 1.5's `lib/fog/system.class.php` |
-| `dev-branch` | the release prefix from the same file, **plus the compare API count** (`master...dev-branch`) |
+| `stable` | the highest release tag shaped `X.Y.Z` or `X.Y.Z.N` from the releases API, with `.0` appended to a three-part tag (`1.6.0` → `1.6.0.0`). A stable install reports the release tag it sits on (`fog-version.sh`), and every release so far is tagged on the stable tip. A higher release tagged off stable would break that |
+| `dev-branch` | the release prefix from `packages/web/src/Base/System.php` (1.5's `lib/fog/system.class.php` as a fallback), **plus the compare API count** (`master...dev-branch`) |
 | `working-1.6` | the release prefix from `packages/web/src/Base/System.php`, **plus a commit count from the GitHub compare API** |
 | `rc-*` | `packages/web/src/Base/System.php` on the highest `rc-*` branch by version, found through the GitHub API |
 
@@ -57,8 +57,9 @@ number as `ahead_by`:
 `per_page=1&page=2` is load-bearing. The `files[]` diff of `master...working-1.6`
 is attached to page 1 only, so asking for page 2 takes the response from ~2.5 MB
 to ~13 KB while `ahead_by` stays present on every page. Unauthenticated GitHub
-allows 60 requests an hour per IP; the 300-second cache makes this 12, and
-the rc branch lookup another 12. The API
+allows 60 requests an hour per IP. Each 300-second refresh makes four API
+calls -- the beta and dev-branch compares, the rc branch lookup and the stable
+release list -- so 48 an hour, and each `bin/diagnose.php` run adds three. The API
 also rejects any request that sends no `User-Agent`.
 
 ## Deploy
