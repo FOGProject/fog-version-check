@@ -23,8 +23,8 @@ being called beta and is not renamed, because callers exist that we cannot see.
 
 | Branch | Source |
 |---|---|
-| `stable` | `packages/web/lib/fog/system.class.php` on raw.githubusercontent |
-| `dev-branch` | same path, that branch |
+| `stable` | `packages/web/src/Base/System.php` on raw.githubusercontent. A full release number (`1.6.0.N`) is used as it stands; a bare release (`1.6.0`) gets the compare API count appended, like beta. Falls back to 1.5's `lib/fog/system.class.php` |
+| `dev-branch` | the release prefix from the same file, **plus the compare API count** (`master...dev-branch`) |
 | `working-1.6` | the release prefix from `packages/web/src/Base/System.php`, **plus a commit count from the GitHub compare API** |
 | `rc-*` | `packages/web/src/Base/System.php` on the highest `rc-*` branch by version, found through the GitHub API |
 

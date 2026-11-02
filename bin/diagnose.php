@@ -89,8 +89,9 @@ if (function_exists('opcache_get_configuration')) {
 head('GitHub');
 $raw = 'https://raw.githubusercontent.com/FOGProject/fogproject';
 $sources = [
-    'stable' => "$raw/stable/packages/web/lib/fog/system.class.php",
-    'dev-branch' => "$raw/dev-branch/packages/web/lib/fog/system.class.php",
+    // 1.6 since the 1.6.0 release: lib/fog/system.class.php is gone (404).
+    'stable' => "$raw/stable/packages/web/src/Base/System.php",
+    'dev-branch' => "$raw/dev-branch/packages/web/src/Base/System.php",
     'working-1.6' => "$raw/working-1.6/packages/web/src/Base/System.php",
 ];
 foreach ($sources as $branch => $url) {
