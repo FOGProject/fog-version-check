@@ -82,6 +82,15 @@ of its refs has moved, or once it is an hour old:
 With no pushes that is 3 API calls an hour. Each `bin/diagnose.php` run adds
 two more.
 
+One exception: `stable` is not pinned to the tag list while the highest
+`X.Y.Z(.N)` tag has no published (non-draft, non-prerelease) release. It then
+asks the releases API every 300 s, 12 an hour, until the release is published.
+A release-shaped tag that is never released keeps it there: still under the
+limit, but worth fixing by releasing or deleting that tag.
+
+If the ref list itself cannot be fetched, every answer stays on the last refs
+seen until it can.
+
 ## Deploy
 
 The document root for `fogproject.org` is `/var/www/html/website`, so the served
