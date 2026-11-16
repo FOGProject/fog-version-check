@@ -13,7 +13,14 @@
 
 const REPO_RAW  = 'https://raw.githubusercontent.com/FOGProject/fogproject';
 const REPO_API  = 'https://api.github.com/repos/FOGProject/fogproject';
+// git's smart-HTTP ref advertisement: every branch and tag head in one ~100KB
+// response. It is not the REST API, so it does not count against the 60 calls
+// an hour this host's IP gets, a limit download.php on the same host shares.
+const REPO_REFS = 'https://github.com/FOGProject/fogproject.git/info/refs?service=git-upload-pack';
 const CACHE_TTL = 300;
+// An answer whose inputs have not moved is still re-asked after this long, in
+// case GitHub changed something no ref shows (a release flipped to prerelease).
+const CACHE_MAX_AGE = 3600;
 // Kept in a subdirectory so the web user needs write access to cache/ ALONE,
 // not to the checkout -- nothing that serves a request can rewrite index.php.
 const CACHE_DIR = __DIR__ . '/cache';
@@ -43,17 +50,127 @@ function httpGet($url)
 }
 
 /**
- * Serve $name from cache, refreshing it through $fetch() when older than TTL.
+ * Every ref on the fogproject repo, as [ref name => commit sha].
+ *
+ * Cached for CACHE_TTL like everything else. This is what lets the answers
+ * below skip the API: each one is keyed on the refs it depends on, and only
+ * asks the API again when one of those refs has moved.
+ *
+ * @return array|null the refs, or null when GitHub has never answered
  */
-function cached($name, $fetch)
+function refs()
+{
+    static $refs = false;
+    if ($refs !== false) {
+        return $refs;
+    }
+    $body = cached('refs.txt', null, function () {
+        // pkt-lines of "<sha> <ref>"; the first one carries "\0capabilities".
+        $pattern = '#(?<sha>[0-9a-f]{40}) (?<ref>refs/[^\x00\n]+)#';
+        if (!preg_match_all($pattern, httpGet(REPO_REFS), $matches, PREG_SET_ORDER)) {
+            return '';
+        }
+        // Stored one "<ref> <sha>" per line.
+        return implode("\n", array_map(function ($match) {
+            return $match['ref'] . ' ' . $match['sha'];
+        }, $matches));
+    });
+    $parsed = [];
+    foreach (array_filter(explode("\n", $body)) as $line) {
+        list($ref, $sha) = explode(' ', $line, 2);
+        $parsed[$ref] = $sha;
+    }
+    $refs = $parsed ? $parsed : null;
+    return $refs;
+}
+
+/**
+ * The commit shas of $branches, joined: the cache key for an answer that
+ * depends on those branches. null when the refs are unknown.
+ */
+function headsKey(...$branches)
+{
+    $refs = refs();
+    if ($refs === null) {
+        return null;
+    }
+    return implode(' ', array_map(function ($b) use ($refs) {
+        return isset($refs["refs/heads/$b"]) ? $refs["refs/heads/$b"] : '-';
+    }, $branches));
+}
+
+/**
+ * The commit sha $branch points at, or the branch name when the refs are
+ * unknown. Reading raw files and compares by sha matters: raw.githubusercontent
+ * caches a branch-name URL for up to 300 s, so a fetch just after a push can get
+ * the old file and store it under the new key for CACHE_MAX_AGE. A sha URL
+ * never changes content.
+ */
+function headRef($branch)
+{
+    $refs = refs();
+    return isset($refs["refs/heads/$branch"]) ? $refs["refs/heads/$branch"] : $branch;
+}
+
+/**
+ * The highest release-shaped tag (X.Y.Z or X.Y.Z.N), as a stable install
+ * reports it: '.0' appended to a three-part tag. '' when there is none or the
+ * refs are unknown.
+ */
+function highestReleaseTag()
+{
+    $refs = refs();
+    $best = '';
+    foreach (array_keys($refs === null ? [] : $refs) as $ref) {
+        if (preg_match('#^refs/tags/([0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?)$#', $ref, $m)
+            && ($best === '' || version_compare($m[1], $best, '>'))
+        ) {
+            $best = $m[1];
+        }
+    }
+    return ($best !== '' && substr_count($best, '.') === 2) ? $best . '.0' : $best;
+}
+
+/**
+ * A digest of every tag name: the cache key for stable, because a new release
+ * is a new tag. null when the refs are unknown.
+ */
+function tagsKey()
+{
+    $refs = refs();
+    if ($refs === null) {
+        return null;
+    }
+    return md5(implode("\n", array_filter(array_keys($refs), function ($ref) {
+        return strpos($ref, 'refs/tags/') === 0;
+    })));
+}
+
+/**
+ * Serve $name from cache, refreshing it through $fetch() when it is stale.
+ *
+ * Stale means older than CACHE_TTL AND either $key changed since the last
+ * good answer or that answer is older than CACHE_MAX_AGE. $key is a string
+ * naming the inputs the answer depends on (commit shas); while it is
+ * unchanged, the answer cannot have changed, so GitHub is not asked. A null
+ * $key means "unknown", and the entry refreshes on CACHE_TTL alone.
+ */
+function cached($name, $key, $fetch)
 {
     $path = CACHE_DIR . '/' . $name;
-    $fresh = file_exists($path) && (time() - filemtime($path)) <= CACHE_TTL;
+    $keyPath = $path . '.key';
+    $age = file_exists($path) ? time() - filemtime($path) : PHP_INT_MAX;
+    $same = $key !== null && file_exists($keyPath) && file_get_contents($keyPath) === $key;
 
-    if (!$fresh) {
-        $value = $fetch();
+    if ($age > CACHE_TTL && (!$same || $age > CACHE_MAX_AGE)) {
+        // $fetch may set $key to null: "this answer is not final yet, do not
+        // pin it to these refs".
+        $value = $fetch($key);
         if ($value !== '') {
             file_put_contents($path, $value);
+            if ($key !== null) {
+                file_put_contents($keyPath, $key);
+            }
             return $value;
         }
         // GitHub is unreachable, rate limited, or mid-outage. Keep serving the
@@ -72,7 +189,7 @@ function cached($name, $fetch)
  */
 function sourceVersion($branch, $path)
 {
-    $source = httpGet(REPO_RAW . '/' . $branch . '/' . $path);
+    $source = httpGet(REPO_RAW . '/' . headRef($branch) . '/' . $path);
     if ($source !== '' && preg_match("/FOG_VERSION',\s*'([0-9A-Za-z.-]+)'/", $source, $m)) {
         return $m[1];
     }
@@ -100,8 +217,7 @@ function sourceVersion($branch, $path)
  * per_page=1&page=2 is what keeps this cheap. The files[] diff of
  * master...working-1.6 is enormous and is only attached to page 1, so asking
  * for page 2 takes the response from ~2.5MB to ~13KB; ahead_by is on every
- * page. With the 300s cache that is 12 unauthenticated API calls an hour,
- * against a limit of 60.
+ * page. It is called only after master or working-1.6 moves; see $versions.
  */
 function betaVersion()
 {
@@ -113,7 +229,7 @@ function betaVersion()
     $prefix = preg_replace('/\.[0-9]+$/', '', $prefix);
 
     $compare = json_decode(
-        httpGet(REPO_API . '/compare/master...working-1.6?per_page=1&page=2'),
+        httpGet(REPO_API . '/compare/' . headRef('master') . '...' . headRef('working-1.6') . '?per_page=1&page=2'),
         true
     );
     if (!isset($compare['ahead_by'])) {
@@ -124,7 +240,8 @@ function betaVersion()
 }
 
 /**
- * The current release candidate: FOG_VERSION on the highest rc-* branch.
+ * The release candidate branch: the highest rc-* branch. The rc answer is
+ * FOG_VERSION as committed on it.
  *
  * The branch name changes per release (rc-1.6.0, rc-1.6.1, ...), so it is
  * resolved the way the installer's channelToBranch does it in
@@ -137,31 +254,28 @@ function betaVersion()
  * committed value standing in head mode, so the source IS what a running RC
  * server reports.
  *
- * One API call per cache refresh. With the beta and dev compares and the
- * stable release list, four per 300 s refresh: 48 an hour, of 60.
+ * The rc-* heads come from refs(), so this makes no API call at all.
+ *
+ * @return string|null the rc branch name, '' when there is no rc branch, or
+ *                     null when the refs are unknown
  */
-function rcVersion()
+function rcBranch()
 {
-    $refs = json_decode(httpGet(REPO_API . '/git/matching-refs/heads/rc-'), true);
-    if (!is_array($refs)) {
-        return '';
+    $refs = refs();
+    if ($refs === null) {
+        return null;
     }
     $best = '';
-    foreach ($refs as $ref) {
-        if (!isset($ref['ref'])
-            || !preg_match('#^refs/heads/rc-([0-9][0-9.]*)$#', $ref['ref'], $m)
-        ) {
+    foreach (array_keys($refs) as $ref) {
+        if (!preg_match('#^refs/heads/rc-([0-9][0-9.]*)$#', $ref, $m)) {
             continue;
         }
         if ($best === '' || version_compare($m[1], $best, '>')) {
             $best = $m[1];
         }
     }
-    if ($best === '') {
-        return '';
-    }
 
-    return sourceVersion('rc-' . $best, 'packages/web/src/Base/System.php');
+    return $best === '' ? '' : 'rc-' . $best;
 }
 
 /**
@@ -189,7 +303,7 @@ function devVersion()
         return $version;
     }
     $compare = json_decode(
-        httpGet(REPO_API . '/compare/master...' . $branch . '?per_page=1&page=2'),
+        httpGet(REPO_API . '/compare/' . headRef('master') . '...' . headRef($branch) . '?per_page=1&page=2'),
         true
     );
     if (!isset($compare['ahead_by'])) {
@@ -235,11 +349,33 @@ function stableVersion()
 // Keyed by the request parameter each one answers to. 'alpha' is the beta
 // branch: the parameter predates the branch being called beta and is a public
 // contract with anything already calling this endpoint, so it stays.
+//
+// Each answer is keyed on the refs it is computed from, so the API is asked
+// only after one of those refs moves (or CACHE_MAX_AGE passes). README.md,
+// "API budget", has the numbers.
+$rcBranch = rcBranch();
 $versions = [
-    'stable' => cached('stable-version.txt', 'stableVersion'),
-    'dev' => cached('dev-branch-version.txt', 'devVersion'),
-    'alpha' => cached('betabranch-version.txt', 'betaVersion'),
-    'rc' => cached('rc-version.txt', 'rcVersion'),
+    'stable' => cached('stable-version.txt', tagsKey(), function (&$key) {
+        $version = stableVersion();
+        // A tag can be pushed before its release is published. Until the
+        // releases API shows the newest tag, keep re-asking every CACHE_TTL
+        // instead of pinning the older answer to the new tag list.
+        if ($version !== highestReleaseTag()) {
+            $key = null;
+        }
+        return $version;
+    }),
+    'dev' => cached('dev-branch-version.txt', headsKey('master', 'dev-branch'), 'devVersion'),
+    'alpha' => cached('betabranch-version.txt', headsKey('master', 'working-1.6'), 'betaVersion'),
+    // No rc branch between releases is an answer, not a failure: report none,
+    // rather than the cached value of an rc branch that no longer exists.
+    'rc' => $rcBranch === '' ? '' : cached(
+        'rc-version.txt',
+        $rcBranch === null ? null : headsKey($rcBranch),
+        function () use ($rcBranch) {
+            return $rcBranch ? sourceVersion($rcBranch, 'packages/web/src/Base/System.php') : '';
+        }
+    ),
 ];
 
 // JSON: any combination of ?stable, ?dev, ?alpha, ?rc returns just those.

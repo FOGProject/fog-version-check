@@ -26,7 +26,7 @@ being called beta and is not renamed, because callers exist that we cannot see.
 | `stable` | the highest release tag shaped `X.Y.Z` or `X.Y.Z.N` from the releases API, with `.0` appended to a three-part tag (`1.6.0` → `1.6.0.0`). A stable install reports the release tag it sits on (`fog-version.sh`), and every release so far is tagged on the stable tip. A higher release tagged off stable would break that |
 | `dev-branch` | the release prefix from `packages/web/src/Base/System.php` (1.5's `lib/fog/system.class.php` as a fallback), **plus the compare API count** (`master...dev-branch`) |
 | `working-1.6` | the release prefix from `packages/web/src/Base/System.php`, **plus a commit count from the GitHub compare API** |
-| `rc-*` | `packages/web/src/Base/System.php` on the highest `rc-*` branch by version, found through the GitHub API |
+| `rc-*` | `packages/web/src/Base/System.php` on the highest `rc-*` branch by version, found in the git ref list. No `rc-*` branch means no rc answer |
 
 An rc branch commits its version (`1.6.0-RC-1`, `-RC-2`, …) into `System.php`,
 so the source is exactly what a running RC server reports. The branch name
@@ -56,11 +56,31 @@ number as `ahead_by`:
 
 `per_page=1&page=2` is load-bearing. The `files[]` diff of `master...working-1.6`
 is attached to page 1 only, so asking for page 2 takes the response from ~2.5 MB
-to ~13 KB while `ahead_by` stays present on every page. Unauthenticated GitHub
-allows 60 requests an hour per IP. Each 300-second refresh makes four API
-calls -- the beta and dev-branch compares, the rc branch lookup and the stable
-release list -- so 48 an hour, and each `bin/diagnose.php` run adds three. The API
-also rejects any request that sends no `User-Agent`.
+to ~13 KB while `ahead_by` stays present on every page. The API also rejects
+any request that sends no `User-Agent`.
+
+### API budget
+
+Unauthenticated GitHub allows 60 API requests an hour per IP, and
+`download.php` on the same host shares that IP. On 2026-11-16 this endpoint
+spent 48 an hour (four calls per 300-second refresh) and the download page ran
+out.
+
+So every answer is keyed on the git refs it depends on. One fetch of
+`https://github.com/FOGProject/fogproject.git/info/refs?service=git-upload-pack`
+(git's own ref list, not the API, so it does not count) every 300 seconds gives
+the sha of every branch and tag. An answer goes back to the API only when one
+of its refs has moved, or once it is an hour old:
+
+| Answer | Key | API call |
+|---|---|---|
+| `stable` | the tag list | releases list |
+| `dev` | `master` + `dev-branch` shas | compare |
+| `alpha` | `master` + `working-1.6` shas | compare |
+| `rc` | the `rc-*` branch sha | none |
+
+With no pushes that is 3 API calls an hour. Each `bin/diagnose.php` run adds
+two more.
 
 ## Deploy
 
