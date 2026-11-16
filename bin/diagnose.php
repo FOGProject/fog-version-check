@@ -56,13 +56,14 @@ line(
 );
 if (is_readable($index)) {
     line('index.php modified', true, date('Y-m-d H:i:s', filemtime($index)));
-    // The fingerprint that separates this file from the pre-repo one: the old
-    // index.php had no CACHE_DIR and never called the compare API.
+    // The fingerprint that separates this file from older ones: only the
+    // version that keys its cache on the git refs reads REPO_REFS. Older ones
+    // spend four API calls on every refresh.
     $src = file_get_contents($index);
     line(
         'is the repo version',
-        strpos($src, 'ahead_by') !== false,
-        strpos($src, 'ahead_by') !== false ? 'yes' : 'NO -- an older index.php is on disk'
+        strpos($src, 'REPO_REFS') !== false,
+        strpos($src, 'REPO_REFS') !== false ? 'yes' : 'NO -- an older index.php is on disk'
     );
 }
 // The classic "I replaced the file and nothing changed": php-fpm is serving a
@@ -135,13 +136,20 @@ line(
             isset($cmp['message']) ? '-- ' . $cmp['message'] : ''
         )
 );
+// index.php keys every answer on the git refs, read from git's smart-HTTP
+// ref list rather than the API. If this fails, every answer goes stale.
+$res = get('https://github.com/FOGProject/fogproject.git/info/refs?service=git-upload-pack');
+$refs = preg_match_all('#[0-9a-f]{40} (refs/[^\x00\n]+)#', $res['body'], $m) ? $m[1] : null;
+line(
+    'git refs (info/refs)',
+    $refs !== null,
+    $refs !== null ? "HTTP {$res['code']} -> " . count($refs) . ' refs' : "HTTP {$res['code']} {$res['err']}"
+);
 // The release candidate lives on the highest rc-* branch, whose name changes
 // per release. Resolved the same way as index.php and the installer.
-$res = get('https://api.github.com/repos/FOGProject/fogproject/git/matching-refs/heads/rc-');
-$refs = json_decode($res['body'], true);
 $rc = '';
-foreach (is_array($refs) ? $refs : [] as $ref) {
-    if (isset($ref['ref']) && preg_match('#^refs/heads/rc-([0-9][0-9.]*)$#', $ref['ref'], $m)
+foreach ($refs !== null ? $refs : [] as $ref) {
+    if (preg_match('#^refs/heads/rc-([0-9][0-9.]*)$#', $ref, $m)
         && ($rc === '' || version_compare($m[1], $rc, '>'))
     ) {
         $rc = $m[1];
@@ -149,7 +157,7 @@ foreach (is_array($refs) ? $refs : [] as $ref) {
 }
 if ($rc === '') {
     // No rc-* branch is a real state between releases, not a failure.
-    line('rc branch', is_array($refs), is_array($refs) ? 'none published' : "HTTP {$res['code']} {$res['err']}");
+    line('rc branch', $refs !== null, $refs !== null ? 'none published' : 'refs unknown');
 } else {
     $res = get("$raw/rc-$rc/packages/web/src/Base/System.php");
     $ver = preg_match("/FOG_VERSION',\s*'([0-9A-Za-z.-]+)'/", $res['body'], $m) ? $m[1] : '';
@@ -178,13 +186,27 @@ foreach (['stable-version.txt', 'dev-branch-version.txt', 'betabranch-version.tx
         line($name, true, 'absent -- will be fetched on the next request');
         continue;
     }
+    // With no rc-* branch the endpoint answers rc as none and never reads
+    // this file, so its old value would only mislead.
+    if ($name === 'rc-version.txt' && $refs !== null && $rc === '') {
+        line($name, true, 'not used -- no rc branch, the endpoint answers none');
+        continue;
+    }
     $age = time() - filemtime($path);
     line(
         $name,
         true,
-        sprintf('%-18s %ds old%s', trim(file_get_contents($path)), $age, $age > 300 ? ' (stale, refreshes next request)' : '')
+        sprintf('%-18s %ds old%s', trim(file_get_contents($path)), $age, $age > 300 ? ' (re-asked once its refs move, or at 3600s)' : '')
     );
 }
+$path = "$dir/refs.txt";
+line(
+    'refs.txt',
+    true,
+    file_exists($path)
+        ? count(file($path)) . ' refs, ' . (time() - filemtime($path)) . 's old'
+        : 'absent -- will be fetched on the next request'
+);
 
 head($fail ? "$fail check(s) FAILED" : 'All checks passed');
 echo "\nTo force a refresh, delete the cache and hit the endpoint:\n";
